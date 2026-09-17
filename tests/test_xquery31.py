@@ -445,5 +445,209 @@ class LxmlXQuery31ConstructorsTest(XQuery31ConstructorsTest):
         self.check_xml('<a>{namespace p { "urn:p" }}</a>', ['<a xmlns:p="urn:p"/>'])
 
 
+class XQuery31FLWORTest(unittest.TestCase):
+    etree = ElementTree
+
+    def setUp(self):
+        self.root = self.etree.XML(
+            '<root><item n="2">b</item><item n="1">c</item><item>a</item></root>'
+        )
+
+    def select(self, expression, **kwargs):
+        return select(self.root, expression, parser=XQuery31Parser, **kwargs)
+
+    def check_error(self, expression, code, **kwargs):
+        with self.assertRaises(ElementPathError) as ctx:
+            self.select(expression, **kwargs)
+        self.assertIn(code, str(ctx.exception))
+
+    def test_for_and_let_clauses(self):
+        self.assertEqual(self.select('for $x in 1 to 3 return $x * 2'), [2, 4, 6])
+        self.assertEqual(self.select('let $x := (1, 2) return count($x)'), 2)
+        self.assertEqual(self.select('for $x in 1 to 3 let $y := $x * 2 return $y'), [2, 4, 6])
+        self.assertEqual(self.select('let $x := 2 for $y in 1 to $x return $x + $y'), [3, 4])
+        self.assertEqual(self.select('let $a := 1 let $b := $a let $c := $a + $b return $c'), 2)
+        self.assertEqual(
+            self.select('for $x in (1, 2), $y in ("a", "b") return $x || $y'),
+            ['1a', '1b', '2a', '2b']
+        )
+        self.assertEqual(
+            self.select('for $x in (1, 2) for $y in ("a", "b") return $x || $y'),
+            ['1a', '1b', '2a', '2b']
+        )
+        self.assertEqual(self.select('let $x := 1, $y := $x + 1 return $y'), 2)
+        self.assertEqual(self.select('for $x in 1 return $x'), [1])
+
+    def test_variable_shadowing(self):
+        self.assertEqual(self.select('let $x := 1 for $x in ($x, 2) return $x'), [1, 2])
+        self.assertEqual(self.select('for $x in (1, 2) let $x := $x * 10 return $x'), [10, 20])
+        self.assertEqual(self.select('for $x in (1, 2) return $x', variables={'x': 5}), [1, 2])
+
+    def test_positional_variables(self):
+        self.assertEqual(self.select('for $x at $i in ("a", "b") return $i || $x'),
+                         ['1a', '2b'])
+        self.assertEqual(self.select('for $x at $i in /root/item return $i'), [1, 2, 3])
+        self.check_error('for $x at $x in (1, 2) return $x', 'XQST0089')
+
+    def test_allowing_empty(self):
+        self.assertEqual(self.select('for $x in () return 1'), [])
+        self.assertEqual(self.select('for $x allowing empty in () return count($x)'), [0])
+        self.assertEqual(self.select('for $x allowing empty at $i in () return $i'), [0])
+        self.assertEqual(self.select('for $x allowing empty in (5, 6) return $x'), [5, 6])
+
+    def test_type_declarations(self):
+        self.assertEqual(self.select('for $x as xs:integer in (1, 2) return $x'), [1, 2])
+        self.assertEqual(self.select('let $x as xs:string* := ("a", "b") return $x'), ['a', 'b'])
+        self.assertEqual(self.select('for $x as element(item) in /root/item return 1'), [1, 1, 1])
+        self.check_error('for $x as xs:string in (1, 2) return $x', 'XPTY0004')
+        self.check_error('let $x as xs:integer := (1, 2) return $x', 'XPTY0004')
+        self.check_error('for $x as xs:integer allowing empty in () return $x', 'XPTY0004')
+        self.check_error('for $x as xs:unknownType in (1, 2) return $x', 'XPST0051')
+
+    def test_where_clause(self):
+        self.assertEqual(self.select('for $x in 1 to 5 where $x mod 2 = 0 return $x'), [2, 4])
+        self.assertEqual(
+            self.select('for $x in 1 to 3 let $y := $x * 2 where $y > 2 return $y'), [4, 6]
+        )
+        self.assertEqual(
+            self.select('for $i in /root/item where $i/@n return string($i)'), ['b', 'c']
+        )
+        self.assertEqual(
+            self.select('for $x in 1 to 5 where $x > 1 where $x < 4 return $x'), [2, 3]
+        )
+
+    def test_count_clause(self):
+        self.assertEqual(self.select('for $x in ("a", "b") count $c return $c'), [1, 2])
+        self.assertEqual(
+            self.select('for $x in 1 to 6 where $x mod 2 = 0 count $c return $c'), [1, 2, 3]
+        )
+        self.assertEqual(
+            self.select('for $x in (3, 1, 2) count $c order by $x return $c'), [2, 3, 1]
+        )
+        self.assertEqual(
+            self.select('for $x in (3, 1, 2) order by $x count $c return $c'), [1, 2, 3]
+        )
+
+    def test_order_by_clause(self):
+        self.assertEqual(self.select('for $x in (3, 1, 2) order by $x return $x'), [1, 2, 3])
+        self.assertEqual(
+            self.select('for $x in (3, 1, 2) order by $x descending return $x'), [3, 2, 1]
+        )
+        self.assertEqual(
+            self.select('for $x in ("b", "a", "c") order by $x ascending return $x'),
+            ['a', 'b', 'c']
+        )
+        self.assertEqual(
+            self.select('for $x in (1.5, 1, xs:double(0.5)) stable order by $x return $x'),
+            [0.5, 1, 1.5]
+        )
+        self.assertEqual(
+            self.select('for $i in /root/item order by string($i) return string($i/@n)'),
+            ['', '2', '1']
+        )
+
+    def test_order_by_multiple_keys(self):
+        self.assertEqual(
+            self.select('for $p in ([1, "b"], [2, "a"], [1, "a"]) '
+                        'order by $p(1) descending, $p(2) return $p(1) || $p(2)'),
+            ['2a', '1a', '1b']
+        )
+        self.assertEqual(
+            self.select('for $x in (1, 2, 3, 4) order by $x mod 2 return $x'), [2, 4, 1, 3]
+        )
+
+    def test_order_by_empty_and_nan(self):
+        query = 'for $i in /root/item order by $i/@n {} return string($i)'
+        self.assertEqual(self.select(query.format('')), ['a', 'c', 'b'])
+        self.assertEqual(self.select(query.format('empty least')), ['a', 'c', 'b'])
+        self.assertEqual(self.select(query.format('empty greatest')), ['c', 'b', 'a'])
+        self.assertEqual(self.select(query.format('descending')), ['b', 'c', 'a'])
+        self.assertEqual(self.select(query.format('descending empty greatest')),
+                         ['a', 'b', 'c'])
+
+        query = 'for $x in ([2], [xs:double("NaN")], [], [1]) order by $x?* %s ' \
+                'return if (empty($x?*)) then "empty" else string($x?*)'
+        self.assertEqual(self.select(query % ''), ['empty', 'NaN', '1', '2'])
+        self.assertEqual(self.select(query % 'empty greatest'), ['1', '2', 'NaN', 'empty'])
+        self.assertEqual(self.select(query % 'descending'), ['2', '1', 'NaN', 'empty'])
+
+    def test_order_by_collation(self):
+        uca = "http://www.w3.org/2013/collation/UCA?strength=primary"
+        codepoint = "http://www.w3.org/2005/xpath-functions/collation/codepoint"
+        query = 'for $x in ("b", "B", "a") order by $x collation "{}" return $x'
+        self.assertEqual(self.select(query.format(codepoint)), ['B', 'a', 'b'])
+        try:
+            self.assertEqual(self.select(query.format(uca))[0], 'a')
+        except ElementPathError:
+            pass  # UCA collation not supported on this platform
+        self.check_error(query.format('http://example.com/unknown'), 'XQST0076')
+
+    def test_order_by_errors(self):
+        self.check_error('for $x in (1, "a") order by $x return $x', 'XPTY0004')
+        self.check_error('for $x in (1, true()) order by $x return $x', 'XPTY0004')
+        self.check_error('for $x in (1, 2) order by ($x, $x) return $x', 'XPTY0004')
+        self.check_error('for $x in 1 order by ($x, $x) return $x', 'XPTY0004')
+        self.check_error('for $x in (1, 2) order $x return $x', 'XPST0003')
+        self.check_error('for $x in (1, 2) stable by $x return $x', 'XPST0003')
+
+    def test_syntax_errors(self):
+        self.check_error('for $x in (1, 2)', 'XPST0003')
+        self.check_error('for $x in (1, 2) where $x', 'XPST0003')
+        self.check_error('let $x = 1 return $x', 'XPST0003')
+        self.check_error('for $x in (1, 2) let return $x', 'XPST0003')
+        self.check_error('for $x in (1, 2) count return $x', 'XPST0003')
+        self.check_error('for $x in (1, 2) allowing $y in (1) return $x', 'XPST0003')
+        self.check_error('1 for $x in (1, 2) return $x', 'XPST0003')
+
+    def test_unsupported_clauses(self):
+        self.check_error('for $x in (1, 2) group by $k := $x return $x', 'XPST0003')
+        self.check_error('for tumbling window $w in (1, 2) start when true() return $w',
+                         'XPST0003')
+        self.check_error('for sliding window $w in (1, 2) start when true() return $w',
+                         'XPST0003')
+
+    def test_keywords_as_names(self):
+        root = self.etree.XML('<root><for>1</for><order>2</order><where>3</where></root>')
+        self.assertEqual(select(root, 'string(/root/order)', parser=XQuery31Parser), '2')
+        self.assertEqual(select(root, 'string(/root/where)', parser=XQuery31Parser), '3')
+        self.assertEqual(select(root, 'count(/root/for)', parser=XQuery31Parser), 1)
+        self.assertEqual(
+            select(root, 'for $x in /root/* order by string($x) descending '
+                         'return name($x)', parser=XQuery31Parser),
+            ['where', 'order', 'for']
+        )
+
+    def test_flwor_with_constructors(self):
+        result = self.select('<ul>{for $i in /root/item order by string($i) '
+                             'return <li>{string($i)}</li>}</ul>')
+        self.assertEqual(
+            self.etree.tostring(result[0], encoding='unicode'),
+            '<ul><li>a</li><li>b</li><li>c</li></ul>'
+        )
+        self.assertEqual(
+            self.select('for $x in (1, 2) let $e := <e>{$x}</e> return string($e)'), ['1', '2']
+        )
+
+    def test_source(self):
+        query = 'for $x at $i in (1, 2) let $y := $x where $y > 0 ' \
+                'order by $y descending count $c return $c'
+        token = XQuery31Parser().parse(query)
+        self.assertEqual(token.source, query)
+        self.assertEqual(XQuery31Parser().parse(f'({query})').source, f'({query})')
+
+    def test_xpath_parsers_are_unchanged(self):
+        with self.assertRaises(ElementPathError):
+            select(self.root, 'for $x in (1, 2) where $x > 1 return $x', parser=XPath31Parser)
+        with self.assertRaises(ElementPathError):
+            select(self.root, 'let $a := 1 let $b := 2 return $a', parser=XPath31Parser)
+        self.assertEqual(select(self.root, 'for $x in 1 to 2 return $x', parser=XPath31Parser),
+                         [1, 2])
+
+
+@unittest.skipIf(lxml_etree is None, "The lxml library is not installed")
+class LxmlXQuery31FLWORTest(XQuery31FLWORTest):
+    etree = lxml_etree
+
+
 if __name__ == '__main__':
     unittest.main()

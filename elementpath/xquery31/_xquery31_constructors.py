@@ -32,39 +32,25 @@ from ._dir_scanner import DirectConstructorScanner
 
 __all__ = ['XQuery31Parser']
 
-register = XQuery31Parser.register
-method = XQuery31Parser.method
-
-
-def redefine(symbol: str) -> None:
-    """
-    Replaces an inherited token class with a copy owned by the XQuery parser,
-    so that its methods can be redefined without affecting XPath parsers.
-    """
-    token_class = XQuery31Parser.symbol_table[symbol]
-    XQuery31Parser.unregister(symbol)
-    new_class = register(symbol, lbp=token_class.lbp, rbp=token_class.rbp,
-                         label=token_class.label)
-
-    for name, value in token_class.__dict__.items():
-        if not name.startswith('_') and name not in ('symbol', 'lookup_name', 'pattern'):
-            setattr(new_class, name, value)
-
 
 ###
 # Direct constructors: the '<' symbol is a comparison operator in the
 # operator position and the start of a direct constructor in the operand
 # position.
-redefine('<')
+_less_than_class = XQuery31Parser.symbol_table['<']
 
 
-@method('<')
-def nud__direct_constructor(self: XPathToken) -> XPathToken:
-    source = self.parser.source
-    pos = self.span[1]
-    if source.startswith(('!--', '?'), pos) or QNAME_PATTERN.match(source, pos):
-        return DirectConstructorScanner(self.parser).parse(self.span[0])
-    raise self.wrong_syntax()
+class _LessThanOperator(_less_than_class):  # type: ignore[misc, valid-type]
+
+    def nud(self) -> XPathToken:
+        source = self.parser.source
+        pos = self.span[1]
+        if source.startswith(('!--', '?'), pos) or QNAME_PATTERN.match(source, pos):
+            return DirectConstructorScanner(self.parser).parse(self.span[0])
+        raise self.wrong_syntax()
+
+
+XQuery31Parser.symbol_table['<'] = _LessThanOperator
 
 
 def is_constructed(node: XPathNode) -> bool:
@@ -74,12 +60,6 @@ def is_constructed(node: XPathNode) -> bool:
 ###
 # Node order comparisons and fn:root(): extended to the nodes of constructed
 # trees, that are not reachable from the dynamic context.
-redefine('<<')
-redefine('>>')
-
-
-@method('<<')
-@method('>>')
 def evaluate__node_order_comparison(self: XPathToken, context: ta.ContextType = None) \
         -> ta.OneOrEmpty[bool]:
     operands = []
@@ -110,6 +90,22 @@ def evaluate__node_order_comparison(self: XPathToken, context: ta.ContextType = 
                 elif right is item:
                     return self.symbol == '>>'
     raise self.error('FOCA0002', "operands are not nodes of the XML tree!")
+
+
+_precedes_class = XQuery31Parser.symbol_table['<<']
+_follows_class = XQuery31Parser.symbol_table['>>']
+
+
+class _PrecedesOperator(_precedes_class):  # type: ignore[misc, valid-type]
+    evaluate = evaluate__node_order_comparison
+
+
+class _FollowsOperator(_follows_class):  # type: ignore[misc, valid-type]
+    evaluate = evaluate__node_order_comparison
+
+
+XQuery31Parser.symbol_table['<<'] = _PrecedesOperator
+XQuery31Parser.symbol_table['>>'] = _FollowsOperator
 
 
 _root_class = XQuery31Parser.symbol_table['root']

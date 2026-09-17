@@ -30,7 +30,8 @@ PREDEFINED_ENTITIES = {'lt': '<', 'gt': '>', 'amp': '&', 'quot': '"', 'apos': "'
 class XQuery31Parser(XPath31Parser):
     """
     XQuery 3.1 expression parser class. Currently, it extends the XPath 3.1 parser
-    with direct and computed node constructors. Accepts all XPath 3.1 options as
+    with direct and computed node constructors and with FLWOR expressions (except
+    group by and window clauses). Accepts all XPath 3.1 options as
     keyword arguments.
 
     :param boundary_space: the boundary-space policy of the static context, \
