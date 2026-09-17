@@ -1429,6 +1429,8 @@ def main():
                         help="test XPath 3.0 parser")
     parser.add_argument('--xp31', action='store_true', default=False,
                         help="test XPath 3.0 parser")
+    parser.add_argument('--xq31', action='store_true', default=False,
+                        help="test XQuery 3.1 parser (partial implementation)")
     parser.add_argument('-l', '--lxml', dest='use_lxml', action='store_true', default=False,
                         help="use lxml.etree for environment sources (default is ElementTree)")
     parser.add_argument('-c', dest='show_test_case', action='store_true', default=False,
@@ -1467,7 +1469,15 @@ def main():
 
     start_time = datetime.datetime.now()
 
-    if args.xp31:
+    if args.xq31:
+        from elementpath.xquery31 import XQuery31Parser
+
+        xpath_parser = XQuery31Parser
+        Result.parser = xpath_parser()
+        ignore_specs.clear()
+        ignore_specs.update(('XP20', 'XP30', 'XQ10', 'XQ30', 'XT30+'))
+
+    elif args.xp31:
         from elementpath.xpath31 import XPath31Parser
 
         xpath_parser = XPath31Parser

@@ -26,6 +26,7 @@ XPATH_MATH_FUNCTIONS_NAMESPACE = "http://www.w3.org/2005/xpath-functions/math"
 XPATH_MAP_FUNCTIONS_NAMESPACE = "http://www.w3.org/2005/xpath-functions/map"
 XPATH_ARRAY_FUNCTIONS_NAMESPACE = "http://www.w3.org/2005/xpath-functions/array"
 XSLT_XQUERY_SERIALIZATION_NAMESPACE = "http://www.w3.org/2010/xslt-xquery-serialization"
+XQUERY_LOCAL_FUNCTIONS_NAMESPACE = "http://www.w3.org/2005/xquery-local-functions"
 
 # XML namespace attributes
 XML_BASE = '{%s}base' % XML_NAMESPACE

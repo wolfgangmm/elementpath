@@ -88,6 +88,15 @@ class XPathNodesTest(unittest.TestCase):
 
         self.assertEqual(list(etree_iter_strings(root)), result)
 
+        # Tails of comments and processing instructions are included
+        root = ElementTree.XML('<A>a<B/>b</A>')
+        root.insert(0, ElementTree.Comment('comment'))
+        root[0].tail = 'c'
+        root.append(ElementTree.ProcessingInstruction('pi', 'data'))
+        root[2].tail = 'd'
+        self.assertEqual(list(etree_iter_strings(root)), ['a', 'c', 'b', 'd'])
+        self.assertEqual(list(etree_iter_strings(root, True)), ['a', 'c', 'b', 'd'])
+
     def test_etree_deep_equal_function(self):
         root = ElementTree.XML('<A><B1>10</B1><B2 max="20"/>end</A>')
         self.assertTrue(etree_deep_equal(root, root))

@@ -116,17 +116,14 @@ def etree_iter_strings(elem: Union[DocumentProtocol, ElementProtocol],
             root = elem
 
         for e in elem.iter():
-            if callable(e.tag):
-                continue
-            if e.text is not None:
+            # The text of comments and PIs is excluded, but not their tail
+            if e.text is not None and not callable(e.tag):
                 yield e.text.strip() if e is root else e.text
             if e.tail is not None and e is not root:
                 yield e.tail.strip() if e in root else e.tail
     else:
         for e in elem.iter():
-            if callable(e.tag):
-                continue
-            if e.text is not None:
+            if e.text is not None and not callable(e.tag):
                 yield e.text
             if e.tail is not None and e is not elem:
                 yield e.tail

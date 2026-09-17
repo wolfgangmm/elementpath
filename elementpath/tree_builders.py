@@ -33,7 +33,8 @@ def is_schema(obj: Any) -> bool:
 def get_node_tree(root: ta.RootArgType,
                   namespaces: Optional[ta.NamespacesType] = None,
                   uri: Optional[str] = None,
-                  fragment: Optional[bool] = None) -> ta.RootNodeType:
+                  fragment: Optional[bool] = None,
+                  position: int = 1) -> ta.RootNodeType:
     """
     Returns a tree of XPath nodes that wrap the provided root tree.
 
@@ -45,6 +46,8 @@ def get_node_tree(root: ta.RootArgType,
     case if `root` is an ElementTree instance skips it and use the root Element. If \
     `False` is provided creates a dummy document when the root is an Element instance. \
     For default the root node kind is preserved.
+    :param position: the position of the root node, for document order. Not used \
+    for schema nodes or if root is already a node tree.
     """
     if isinstance(root, (DocumentNode, ElementNode)):
         if uri is not None and root.uri is None:
@@ -67,7 +70,7 @@ def get_node_tree(root: ta.RootArgType,
     elif hasattr(root, 'xpath'):
         # a lxml element tree data
         return build_lxml_node_tree(
-            cast(LxmlRootType, root), uri, fragment
+            cast(LxmlRootType, root), uri, fragment, position
         )
     elif hasattr(root, 'xsd_version') and hasattr(root, 'maps'):
         # a schema or a schema node
@@ -75,13 +78,14 @@ def get_node_tree(root: ta.RootArgType,
             cast(SchemaElemType, root), uri
         )
     else:
-        return build_node_tree(root, namespaces, uri, fragment)
+        return build_node_tree(root, namespaces, uri, fragment, position)
 
 
 def build_node_tree(root: ElementTreeRootType,
                     namespaces: Optional[ta.NamespacesType] = None,
                     uri: Optional[str] = None,
-                    fragment: Optional[bool] = None) -> ta.RootNodeType:
+                    fragment: Optional[bool] = None,
+                    position: int = 1) -> ta.RootNodeType:
     """
     Returns a tree of XPath nodes that wrap the provided root tree.
 
@@ -92,14 +96,13 @@ def build_node_tree(root: ElementTreeRootType,
     case if `root` is an ElementTree instance skips it and use the root Element. If \
     `False` is provided creates a dummy document when the root is an Element instance. \
     For default the root node kind is preserved.
+    :param position: the position of the root node, for document order.
     """
     elem: ElementType
     parent: Any
     child: ta.ChildNodeType
     children: Iterator[Any]
     document: Optional[DocumentProtocol]
-
-    position = 1
     if namespaces is None:
         namespaces = {}
     ns_pos_offset = len(namespaces) + int('xml' not in namespaces) + 1
@@ -190,7 +193,8 @@ def build_node_tree(root: ElementTreeRootType,
 
 def build_lxml_node_tree(root: LxmlRootType,
                          uri: Optional[str] = None,
-                         fragment: Optional[bool] = None) -> ta.RootNodeType:
+                         fragment: Optional[bool] = None,
+                         position: int = 1) -> ta.RootNodeType:
     """
     Returns a tree of XPath nodes that wrap the provided lxml root tree.
 
@@ -200,14 +204,13 @@ def build_lxml_node_tree(root: LxmlRootType,
     case if `root` is an ElementTree instance skips it and use the root Element. If \
     `False` is provided creates a dummy document when the root is an Element instance. \
     For default the root node kind is preserved.
+    :param position: the position of the root node, for document order.
     """
     root_node: ta.RootNodeType
     document: Optional[LxmlDocumentProtocol]
     parent: Any
     child: ta.ChildNodeType
     children: Iterator[Any]
-
-    position = 1
 
     if fragment:
         document = None  # Explicitly requested a fragment: don't create a document node
@@ -255,7 +258,7 @@ def build_lxml_node_tree(root: LxmlRootType,
             raise ElementPathTypeError(msg)
 
         document_node = None
-        root_node = EtreeElementNode(root_elem)
+        root_node = EtreeElementNode(root_elem, None, position)
         if uri is not None:
             root_node.uri = uri
 

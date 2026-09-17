@@ -292,6 +292,29 @@ class TdopParserTest(unittest.TestCase):
             parser.advance_until('UNKNOWN')
         self.assertEqual(str(ec.exception), "unknown symbol '(unknown)'")
 
+    def test_seek(self):
+        parser = type(self.parser)()
+        parser.source = '5 6 7 + 8'
+        parser.tokens = iter(parser.tokenizer.finditer(parser.source))
+        parser.advance()
+        parser.advance()
+        token = parser.token
+        self.assertEqual(token.value, 5)
+        self.assertEqual(parser.next_token.value, 6)
+
+        next_token = parser.seek(6)
+        self.assertIs(parser.token, token)
+        self.assertIs(parser.next_token, next_token)
+        self.assertEqual(next_token.symbol, '+')
+        self.assertEqual(next_token.span, (6, 7))
+        token = parser.advance()
+        self.assertEqual(token.symbol, '+')
+        self.assertEqual(parser.next_token.value, 8)
+
+        parser.seek(9)
+        self.assertIs(parser.token, token)
+        self.assertEqual(parser.next_token.symbol, '(end)')
+
     def test_unescape_helper(self):
         self.assertEqual(self.parser.unescape("'\\''"), "'")
         self.assertEqual(self.parser.unescape('"\\""'), '"')

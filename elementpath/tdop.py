@@ -610,6 +610,26 @@ class Parser(Generic[TK_co], metaclass=ParserMeta):
                     source_chunk.append(self.next_match.group())
         return ''.join(source_chunk)
 
+    def seek(self, pos: int) -> TK_co:
+        """
+        Restarts the tokenizer from a position of the source, loading the next
+        token from there. The current token is preserved. Useful for languages
+        that embed parts not tokenizable with the regex tokenizer (e.g. XML).
+
+        :param pos: the index of the source from which to restart tokenizing.
+        :return: the next token.
+        """
+        assert self.tokenizer, "Parser tokenizer is not built!"
+        token = self.token
+        self.tokens = iter(self.tokenizer.finditer(self.source, pos))
+        self.next_match = None
+        self.next_token = self._start_token
+        try:
+            self.advance()
+        finally:
+            self.token = token
+        return self.next_token
+
     def expression(self, rbp: int = 0) -> TK_co:
         """
         Pratt's function for parsing an expression. It calls token.nud() and then advances
