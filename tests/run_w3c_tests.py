@@ -38,6 +38,7 @@ import xmlschema
 
 from elementpath import ElementPathError, XPath2Parser, XPathContext, XPathNode, \
     CommentNode, ProcessingInstructionNode, get_node_tree, XPathFunction
+from elementpath.exceptions import MissingContextError
 from elementpath.namespaces import XML_NAMESPACE, XPATH_FUNCTIONS_NAMESPACE, get_expanded_name
 from elementpath.xpath_tokens import XPathMap, XPathArray
 from elementpath.datatypes import AnyAtomicType
@@ -632,6 +633,12 @@ class TestCase(object):
         self.environment = None
         self.specs = []
 
+        # XQuery library modules: a namespace URI can be mapped to more files
+        self.modules = {}
+        for child in elem.findall('module', namespaces):
+            filepath = os.path.join(test_set.workdir, child.attrib['file'])
+            self.modules.setdefault(child.attrib['uri'], []).append(filepath)
+
         for child in elem.findall('dependency', namespaces):
             dep_type = child.attrib['type']
             value = child.attrib['value']
@@ -773,6 +780,9 @@ class TestCase(object):
             kwargs['allow_environment'] = True
             kwargs['allow_external_resources'] = True
 
+        if self.modules and xpath_parser.__name__ == 'XQuery31Parser':
+            kwargs['modules'] = self.modules
+
         self.parser = xpath_parser(**kwargs)
 
         if self.test is None:
@@ -825,7 +835,12 @@ class TestCase(object):
 
             for param in environment.params:
                 name = param['name']
-                value = xpath_parser().parse(param['select']).evaluate()
+                try:
+                    value = xpath_parser().parse(param['select']).evaluate()
+                except MissingContextError:
+                    value = xpath_parser().parse(param['select']).evaluate(
+                        XPathContext(root=self.etree.XML("<empty/>"))
+                    )
                 variables[name] = value
 
             for source in environment.sources.values():

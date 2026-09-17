@@ -419,12 +419,14 @@ def parse_order_by_clause(token: FLWORExpression) -> None:
             parser.advance()
             descending = True
 
-        empty_greatest = False
+        empty_greatest = getattr(parser, 'empty_order', 'least') == 'greatest'
         if is_keyword(parser.next_token, 'empty'):
             parser.advance()
             if is_keyword(parser.next_token, 'greatest'):
                 empty_greatest = True
-            elif not is_keyword(parser.next_token, 'least'):
+            elif is_keyword(parser.next_token, 'least'):
+                empty_greatest = False
+            else:
                 raise parser.next_token.wrong_syntax()
             parser.advance()
 

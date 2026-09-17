@@ -16,6 +16,8 @@
 #           https://www.w3.org/TR/xquery-31/
 #           https://www.w3.org/Consortium/Legal/2015/doc-license
 #
+import pathlib
+import tempfile
 import unittest
 import xml.etree.ElementTree as ElementTree
 
@@ -646,6 +648,298 @@ class XQuery31FLWORTest(unittest.TestCase):
 
 @unittest.skipIf(lxml_etree is None, "The lxml library is not installed")
 class LxmlXQuery31FLWORTest(XQuery31FLWORTest):
+    etree = lxml_etree
+
+
+LIBRARY_MODULE = """
+xquery version "3.1";
+module namespace m = "urn:test:m";
+declare namespace secret = "urn:test:secret";
+
+declare variable $m:greeting as xs:string := "hello";
+declare %private variable $m:count := 2;
+
+declare %private function m:shout($s as xs:string) as xs:string {
+  upper-case($s)
+};
+
+declare function m:greet($name as xs:string) as xs:string {
+  m:shout($m:greeting) || " " || $name
+};
+
+declare function m:twice($f as function(item()) as item()*, $x) {
+  $f($f($x))
+};
+"""
+
+
+class XQuery31PrologTest(unittest.TestCase):
+    etree = ElementTree
+
+    def setUp(self):
+        self.root = self.etree.XML('<root><a>1</a><a>2</a><declare>3</declare></root>')
+
+    def select(self, expression, **kwargs):
+        return select(self.root, expression, parser=XQuery31Parser, **kwargs)
+
+    def check_error(self, expression, code, **kwargs):
+        with self.assertRaises(ElementPathError) as ctx:
+            self.select(expression, **kwargs)
+        self.assertIn(code, str(ctx.exception))
+
+    def test_version_declaration(self):
+        self.assertEqual(self.select('xquery version "3.1"; 1 + 1'), 2)
+        self.assertEqual(self.select('xquery version "3.0" encoding "UTF-8"; 1'), 1)
+        self.assertEqual(self.select('xquery encoding "utf-8"; 1'), 1)
+        self.check_error('xquery version "4.5"; 1', 'XQST0031')
+        self.check_error('xquery version "3.1" encoding "#x"; 1', 'XQST0087')
+
+    def test_namespace_declarations(self):
+        root = self.etree.XML('<root xmlns:x="urn:x"><x:a>1</x:a></root>')
+        query = 'declare namespace y = "urn:x"; string(/root/y:a)'
+        self.assertEqual(select(root, query, parser=XQuery31Parser), '1')
+        query = 'declare default element namespace "urn:x"; name(<a/>)'
+        self.assertEqual(self.select(query), 'a')
+        query = 'declare default element namespace "urn:x"; namespace-uri(<a/>)'
+        self.assertEqual(self.select(query), 'urn:x')
+
+        self.check_error('declare namespace p = "urn:1"; declare namespace p = "urn:2"; 1',
+                         'XQST0033')
+        self.check_error('declare namespace xml = "urn:1"; 1', 'XQST0070')
+        self.check_error('declare default element namespace "urn:1"; '
+                         'declare default element namespace "urn:2"; 1', 'XQST0066')
+        self.check_error('declare variable $x := 1; declare namespace p = "urn:1"; 1',
+                         'XPST0003')
+
+    def test_keywords_as_names(self):
+        self.assertEqual(self.select('string(/root/declare)'), '3')
+        self.assertEqual(self.select('declare function local:f() { string(/root/declare) }; '
+                                     'local:f()'), ['3'])
+        root = self.etree.XML('<import><module/></import>')
+        self.assertEqual(select(root, 'count(/import/module)', parser=XQuery31Parser), 1)
+
+    def test_variable_declarations(self):
+        self.assertEqual(self.select('declare variable $x := 2; $x * 3'), 6)
+        self.assertEqual(self.select('declare variable $x as xs:integer* := (1, 2); sum($x)'), 3)
+        self.assertEqual(self.select('declare variable $y := $x + 1; '
+                                     'declare variable $x := 1; $y'), 2)
+        self.assertEqual(self.select('declare variable $n := count(//a); $n'), 2)
+        self.assertEqual(
+            self.select('declare variable $x := 1; let $x := 5 return $x'), 5
+        )
+        self.check_error('declare variable $x as xs:string := 1; $x', 'XPTY0004')
+        self.check_error('declare variable $x := 1; declare variable $x := 2; $x', 'XQST0049')
+        self.check_error('declare variable $a := $b; declare variable $b := $a; $a',
+                         'XQDY0054')
+        self.check_error('declare variable $p:x := 1; 1', 'XPST0081')
+
+    def test_external_variables(self):
+        query = 'declare variable $x external; $x * 2'
+        self.assertEqual(self.select(query, variables={'x': 21}), 42)
+        self.check_error(query, 'XPDY0002')
+
+        query = 'declare variable $x as xs:integer external := 10; $x + 1'
+        self.assertEqual(self.select(query), 11)
+        self.assertEqual(self.select(query, variables={'x': 1}), 2)
+        self.check_error(query, 'XPTY0004', variables={'x': 'a'})
+
+        # Declared (not external) variables are not overridden by the caller
+        query = 'declare variable $x := 1; $x'
+        self.assertEqual(self.select(query, variables={'x': 5}), 1)
+
+    def test_function_declarations(self):
+        query = """
+            declare function local:fact($n as xs:integer) as xs:integer {
+              if ($n le 1) then 1 else $n * local:fact($n - 1)
+            };
+            local:fact(10)"""
+        self.assertEqual(self.select(query), 3628800)
+
+        query = """
+            declare function local:even($n) { if ($n = 0) then true() else local:odd($n - 1) };
+            declare function local:odd($n) { if ($n = 0) then false() else local:even($n - 1) };
+            (local:even(10), local:odd(7))"""
+        self.assertEqual(self.select(query), [True, True])
+
+        self.assertEqual(self.select('declare function local:f() { }; count(local:f())'), 0)
+        self.assertEqual(self.select('declare function local:f($a) { $a }; '
+                                     'declare function local:f($a, $b) { $a + $b }; '
+                                     '(local:f(1), local:f(1, 2))'), [1, 3])
+        self.assertEqual(self.select('declare function local:count($s) { count($s) + 1 }; '
+                                     'local:count(//a)'), [3])
+        self.assertEqual(self.select('declare namespace p = "urn:p"; '
+                                     'declare function p:f() { 1 }; Q{urn:p}f()'), [1])
+
+    def test_function_errors(self):
+        self.check_error('local:f(1)', 'XPST0017')
+        self.check_error('declare function local:f($a) { 1 }; local:f()', 'XPST0017')
+        self.check_error('declare function local:f() { 1 }; '
+                         'declare function local:f() { 2 }; 1', 'XQST0034')
+        self.check_error('declare function local:f($a, $a) { 1 }; 1', 'XQST0039')
+        self.check_error('declare function fn:f() { 1 }; 1', 'XQST0045')
+        self.check_error('declare function f() { 1 }; 1', 'XQST0045')
+        self.check_error('declare function Q{}f() { 1 }; 1', 'XQST0060')
+        self.check_error('declare function local:f() external; 1', 'XPST0003')
+
+    def test_function_conversion_rules(self):
+        query = 'declare function local:f($s as xs:string) { $s }; local:f(/root/a[1])'
+        self.assertEqual(self.select(query), ['1'])
+        query = 'declare function local:f($d as xs:double) { $d }; local:f(1)'
+        self.assertEqual(self.select(query), [1.0])
+        self.check_error('declare function local:f($s as xs:string) { $s }; local:f(1)',
+                         'XPTY0004')
+        self.check_error('declare function local:f() as xs:integer { "a" }; local:f()',
+                         'XPTY0004')
+
+    def test_function_scope(self):
+        # Function bodies see global variables but not the variables of the caller
+        query = 'declare variable $v := 1; declare function local:f() { $v }; ' \
+                'let $v := 2 return local:f()'
+        self.assertEqual(self.select(query), 1)
+        query = 'declare function local:f() { $v }; let $v := 2 return local:f()'
+        self.check_error(query, 'XPST0008')
+
+        # Recursive calls don't change the arguments of the calling function
+        query = 'declare function local:sum($n) { if ($n = 0) then 0 else ' \
+                '(local:sum($n - 1), $n)[last()] + local:sum($n - 1) }; local:sum(3)'
+        self.assertEqual(self.select(query), [6])
+
+    def test_function_items(self):
+        query = 'declare function local:inc($x) { $x + 1 }; for-each((1, 2), local:inc#1)'
+        self.assertEqual(self.select(query), [2, 3])
+        query = 'declare function local:f($a, $b) { $a - $b }; ' \
+                'let $g := local:f(?, 1) return ($g(10), for-each((1, 2), local:f(10, ?)))'
+        self.assertEqual(self.select(query), [9, 9, 8])
+        query = 'declare function local:f($a) { $a * 2 }; ' \
+                'function-lookup(xs:QName("local:f"), 1)(4)'
+        self.assertEqual(self.select(query), [8])
+        query = 'declare function local:f($a) { $a }; ' \
+                'function-lookup(xs:QName("local:f"), 2)'
+        self.assertEqual(self.select(query), [])
+        self.check_error('declare function local:f($a) { 1 }; local:f#2', 'XPST0017')
+
+    def test_context_item_declaration(self):
+        self.assertEqual(self.select('declare context item := <x><y/></x>; count(//y)'), 1)
+        self.assertEqual(self.select('declare context item as element() external; name(.)'),
+                         'root')
+        self.check_error('declare context item as xs:integer external; .', 'XPTY0004')
+        self.check_error('declare context item := 1; declare context item := 2; .',
+                         'XQST0099')
+
+    def test_setters(self):
+        self.assertEqual(self.select('declare boundary-space preserve; string(<a> </a>)'), ' ')
+        self.assertEqual(self.select('declare boundary-space strip; string(<a> </a>)'), '')
+        self.assertEqual(
+            self.select('declare base-uri "http://example.com/"; string(static-base-uri())'),
+            'http://example.com/'
+        )
+        query = 'declare default order empty greatest; ' \
+                'for $x in ([1], [], [2]) order by $x?* return count($x?*)'
+        self.assertEqual(self.select(query), [1, 1, 0])
+        query = 'declare default collation ' \
+                '"http://www.w3.org/2005/xpath-functions/collation/codepoint"; ' \
+                'compare("a", "B")'
+        self.assertEqual(self.select(query), 1)
+        self.check_error('declare default collation "urn:unknown"; 1', 'XQST0038')
+        self.assertEqual(self.select('declare ordering unordered; '
+                                     'declare copy-namespaces preserve, inherit; '
+                                     'declare construction strip; '
+                                     'declare option local:x "y"; 1'), 1)
+        self.check_error('declare boundary-space strip; declare boundary-space strip; 1',
+                         'XQST0068')
+
+    def test_decimal_format_declaration(self):
+        query = 'declare decimal-format local:de decimal-separator = "," ' \
+                'grouping-separator = "."; format-number(1234.5, "#.##0,0", "local:de")'
+        self.assertEqual(self.select(query), '1.234,5')
+        query = 'declare default decimal-format decimal-separator = ","; ' \
+                'format-number(1.5, "0,0")'
+        self.assertEqual(self.select(query), '1,5')
+
+    def test_unsupported_declarations(self):
+        self.check_error('import schema "urn:x"; 1', 'XQST0009')
+        self.check_error('import schema namespace s = "urn:x" at "s.xsd"; 1', 'XQST0009')
+
+    def test_syntax_errors(self):
+        # Syntax errors are reported before static errors and unsupported features
+        self.check_error('import schema namespace s := "urn:x"; 1', 'XPST0003')
+        self.check_error('import schema "urn:x"; 1 +', 'XPST0003')
+        self.check_error('declare function name', 'XPST0003')
+        self.check_error('declare function namespace "urn:x"; 1', 'XPST0003')
+        self.check_error('declare variable $x := 1;', 'XPST0003')
+        self.check_error('declare variable $x := 1 1', 'XPST0003')
+        self.check_error('declare context item as xs:integer+ := 1; 1', 'XPST0003')
+        self.check_error('declare default function namespace '
+                         '"http://www.w3.org/2005/xquery-local-functions"; empty-sequence()',
+                         'XPST0003')
+
+    def test_module_import(self):
+        modules = {'urn:test:m': LIBRARY_MODULE}
+        query = 'import module namespace x = "urn:test:m"; x:greet("world")'
+        self.assertEqual(self.select(query, modules=modules), 'HELLO world')
+        query = 'import module namespace x = "urn:test:m"; $x:greeting'
+        self.assertEqual(self.select(query, modules=modules), 'hello')
+        query = 'import module namespace x = "urn:test:m"; ' \
+                'x:twice(function($s) { $s || "!" }, "a")'
+        self.assertEqual(self.select(query, modules=modules), ['a!!'])
+
+        # Private functions and the namespaces of the library are not visible
+        query = 'import module namespace x = "urn:test:m"; x:shout("a")'
+        self.check_error(query, 'XPST0017', modules=modules)
+        query = 'import module namespace x = "urn:test:m"; secret:a'
+        self.check_error(query, 'XPST0081', modules=modules)
+
+    def test_module_import_errors(self):
+        self.check_error('import module namespace x = "urn:none"; 1', 'XQST0059')
+        self.check_error('import module namespace x = "urn:test:m"; 1', 'XQST0059',
+                         modules={'urn:test:m': 'module namespace m = "urn:other"; '})
+        self.check_error('import module namespace x = ""; 1', 'XQST0088')
+        self.check_error('import module namespace x = "urn:test:m"; '
+                         'import module namespace y = "urn:test:m"; 1', 'XQST0047',
+                         modules={'urn:test:m': LIBRARY_MODULE})
+        self.check_error('import module namespace x = "urn:test:m"; 1', 'XQST0048',
+                         modules={'urn:test:m': 'module namespace m = "urn:test:m"; '
+                                                'declare function local:f() { 1 };'})
+        self.check_error('module namespace m = "urn:test:m"; 1', 'XPST0003')
+
+    def test_cyclic_module_imports(self):
+        modules = {
+            'urn:a': 'module namespace a = "urn:a"; import module namespace b = "urn:b"; '
+                     'declare function a:f($n) { if ($n = 0) then "a" else b:f($n - 1) };',
+            'urn:b': 'module namespace b = "urn:b"; import module namespace a = "urn:a"; '
+                     'declare function b:f($n) { if ($n = 0) then "b" else a:f($n - 1) };',
+        }
+        query = 'import module namespace a = "urn:a"; (a:f(3), a:f(4))'
+        self.assertEqual(self.select(query, modules=modules), ['b', 'a'])
+
+    def test_module_import_from_files(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            path = pathlib.Path(dirname).joinpath('lib.xqm')
+            path.write_text(LIBRARY_MODULE, encoding='utf-8')
+            base_uri = pathlib.Path(dirname).as_uri() + '/'
+
+            query = 'import module namespace x = "urn:test:m" at "lib.xqm"; x:greet("a")'
+            self.assertEqual(
+                self.select(query, base_uri=base_uri, allow_external_resources=True),
+                'HELLO a'
+            )
+            self.check_error(query, 'XQST0059', base_uri=base_uri)
+            self.assertEqual(
+                self.select(query, modules={'urn:test:m': str(path)}), 'HELLO a'
+            )
+
+    def test_source(self):
+        query = 'declare variable $x := 1; $x'
+        self.assertEqual(XQuery31Parser().parse(query).source, query)
+        self.assertEqual(XQuery31Parser().parse('xquery version "3.1"; 1').source, '1')
+
+    def test_xpath_parsers_are_unchanged(self):
+        with self.assertRaises(ElementPathError):
+            select(self.root, 'declare variable $x := 1; $x', parser=XPath31Parser)
+
+
+@unittest.skipIf(lxml_etree is None, "The lxml library is not installed")
+class LxmlXQuery31PrologTest(XQuery31PrologTest):
     etree = lxml_etree
 
 
