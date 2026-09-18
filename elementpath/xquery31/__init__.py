@@ -12,6 +12,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .xquery31_parser import XQuery31Parser
 else:
-    from ._xquery31_prolog import XQuery31Parser
+    from ._xquery31_expressions import XQuery31Parser
 
 __all__ = ['XQuery31Parser']

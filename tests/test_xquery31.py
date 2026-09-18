@@ -943,5 +943,133 @@ class LxmlXQuery31PrologTest(XQuery31PrologTest):
     etree = lxml_etree
 
 
+class XQuery31ConditionalExpressionsTest(unittest.TestCase):
+    etree = ElementTree
+
+    def setUp(self):
+        self.root = self.etree.XML(
+            '<root a="1"><b/><switch/><typeswitch/><try>x</try></root>'
+        )
+
+    def select(self, expression, **kwargs):
+        return select(self.root, expression, parser=XQuery31Parser, **kwargs)
+
+    def check_error(self, expression, code, **kwargs):
+        with self.assertRaises(ElementPathError) as ctx:
+            self.select(expression, **kwargs)
+        self.assertIn(code, str(ctx.exception))
+
+    def test_switch_expression(self):
+        query = 'switch ({}) case "a" return 1 case "b" case "c" return 2 default return 3'
+        self.assertEqual(self.select(query.format('"a"')), 1)
+        self.assertEqual(self.select(query.format('"c"')), 2)
+        self.assertEqual(self.select(query.format('"d"')), 3)
+        self.assertEqual(self.select(query.format('()')), 3)
+        self.assertEqual(self.select('switch (()) case 1 return 1 case () return 2 '
+                                     'default return 3'), 2)
+        self.assertEqual(self.select('switch (/root/@a) case 1 return "int" '
+                                     'case "1" return "string" default return 0'), 'string')
+        self.assertEqual(self.select('switch (xs:double("NaN")) case xs:double("NaN") '
+                                     'return "NaN" default return 0'), 'NaN')
+        self.check_error('switch ((1, 2)) case 1 return 1 default return 2', 'XPTY0004')
+        self.check_error('switch (1) default return 2', 'XPST0003')
+        self.check_error('switch (1) case 1 return 1', 'XPST0003')
+
+    def test_typeswitch_expression(self):
+        query = 'for $x in (/root/@a, /root/b, 1, "s", (1, 2)) return typeswitch ($x) ' \
+                'case attribute(a) return "attr" ' \
+                'case element(b) | element(c) return "element" ' \
+                'case $i as xs:integer return $i + 1 ' \
+                'default $d return $d'
+        self.assertEqual(self.select(query), ['attr', 'element', 2, 's', 2, 3])
+
+        query = 'typeswitch ({}) case xs:integer return 1 case xs:integer+ return 2 ' \
+                'case empty-sequence() return 3 default return 4'
+        self.assertEqual(self.select(query.format('5')), 1)
+        self.assertEqual(self.select(query.format('(5, 6)')), 2)
+        self.assertEqual(self.select(query.format('()')), 3)
+        self.assertEqual(self.select(query.format('"a"')), 4)
+
+        self.assertEqual(self.select('typeswitch (<a/>) case $e as element() return name($e) '
+                                     'default return ()'), 'a')
+        self.check_error('typeswitch (1) default return 2', 'XPST0003')
+        self.check_error('typeswitch (1) case xs:integer return 1', 'XPST0003')
+
+    def test_try_catch_expression(self):
+        self.assertEqual(self.select('try { 1 } catch * { 2 }'), 1)
+        self.assertEqual(self.select('try { 1 div 0 } catch * { 2 }'), 2)
+        self.assertEqual(self.select('try { } catch * { 2 }'), [])
+        self.assertEqual(self.select('try { 1 div 0 } catch * { }'), [])
+        self.assertEqual(self.select('try { (1, xs:integer("x")) } catch * { "caught" }'),
+                         'caught')
+        self.assertEqual(
+            self.select('try { 1 div 0 } catch err:XPTY0004 { 1 } '
+                        'catch err:FOAR0001 | err:FOAR0002 { 2 }'), 2
+        )
+        self.assertEqual(self.select('try { 1 div 0 } catch *:FOAR0001 { 1 }'), 1)
+        self.assertEqual(self.select('try { 1 div 0 } catch err:* { 1 }'), 1)
+        self.assertEqual(self.select('try { 1 div 0 } '
+                                     'catch Q{http://www.w3.org/2005/xqt-errors}FOAR0001 { 1 }'),
+                         1)
+        self.assertEqual(
+            self.select('try { try { 1 div 0 } catch err:XPTY0004 { 1 } } catch * { 2 }'), 2
+        )
+        self.check_error('try { 1 div 0 } catch err:XPTY0004 { 1 }', 'FOAR0001')
+        self.check_error('try { 1 } catch', 'XPST0003')
+        self.check_error('try { 1 }', 'XPST0003')
+        self.check_error('try { 1 } catch p:* { 1 }', 'XPST0081')
+
+    def test_error_variables(self):
+        query = 'try { 1 div 0 } catch * { $err:code, $err:description, $err:value }'
+        code, description, *value = self.select(query)
+        self.assertEqual(code, 'err:FOAR0001')
+        self.assertIsInstance(description, str)
+        self.assertEqual(value, [])
+
+        query = 'try { error(xs:QName("local:oops"), "bad thing", (1, 2)) } ' \
+                'catch local:oops { local-name-from-QName($err:code), ' \
+                'namespace-uri-from-QName($err:code), $err:description, $err:value }'
+        self.assertEqual(self.select(query), [
+            'oops', 'http://www.w3.org/2005/xquery-local-functions', 'bad thing', 1, 2
+        ])
+        self.assertEqual(self.select('try { error() } catch err:FOER0000 { 1 }'), 1)
+        self.assertEqual(
+            self.select('try {\n  1 div 0 } catch * { $err:line-number }'), 2
+        )
+        self.assertEqual(self.select('let $err:code := 1 return try { error() } '
+                                     'catch * { $err:code instance of xs:QName }'), True)
+
+    def test_static_errors_are_not_caught(self):
+        self.check_error('try { $undefined } catch * { 1 }', 'XPST0008')
+
+    def test_try_catch_in_functions(self):
+        query = 'declare function local:to-int($s) { try { xs:integer($s) } ' \
+                'catch err:FORG0001 { -1 } }; (local:to-int("5"), local:to-int("x"))'
+        self.assertEqual(self.select(query), [5, -1])
+
+    def test_keywords_as_names(self):
+        self.assertEqual(self.select('count(/root/switch)'), 1)
+        self.assertEqual(self.select('count(/root/typeswitch)'), 1)
+        self.assertEqual(self.select('string(/root/try)'), 'x')
+
+    def test_source(self):
+        for query in ('switch (1) case 1 return 2 default return 3',
+                      'typeswitch (1) case $i as xs:integer return $i default return 0',
+                      'try { 1 div 0 } catch err:FOAR0001 | * { 2 }'):
+            self.assertEqual(XQuery31Parser().parse(query).source, query)
+
+    def test_xpath_parsers_are_unchanged(self):
+        with self.assertRaises(ElementPathError):
+            select(self.root, 'try { 1 } catch * { 2 }', parser=XPath31Parser)
+        with self.assertRaises(ElementPathError):
+            select(self.root, 'switch (1) case 1 return 2 default return 3',
+                   parser=XPath31Parser)
+
+
+@unittest.skipIf(lxml_etree is None, "The lxml library is not installed")
+class LxmlXQuery31ConditionalExpressionsTest(XQuery31ConditionalExpressionsTest):
+    etree = lxml_etree
+
+
 if __name__ == '__main__':
     unittest.main()

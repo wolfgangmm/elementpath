@@ -10,7 +10,7 @@
 import decimal
 import math
 import urllib.parse
-from collections.abc import Iterator, Callable
+from collections.abc import Iterator
 from copy import copy
 from decimal import Decimal
 from itertools import product
@@ -52,8 +52,6 @@ T = TypeVar('T', bound=ta.ItemType)
 class XPathToken(Token[ta.XPathTokenType]):
     """Base class for XPath tokens."""
     registry: ClassVar['TokenRegistry']
-    as_name: Callable[[], 'NameToken']
-
     parser: ta.XPathParserType
     value: ta.ValueType
 
@@ -670,6 +668,15 @@ class XPathToken(Token[ta.XPathTokenType]):
         if uri_parts.path.startswith('/') and base_uri_parts.path not in ('', '/'):
             return uri
         return urllib.parse.urljoin(base_uri, uri)
+
+    def as_name(self) -> 'NameToken':
+        # Keeps the namespace binding, for tokens that are converted to a name
+        # after a prefix has been bound to them (e.g. a proxy token in 'p:head').
+        token = cast('NameToken', super().as_name())  # type: ignore[safe-super]
+        if self.name:
+            token.name = self.name
+            token.namespace = self.namespace
+        return token
 
     def bind_namespace(self, namespace: str) -> None:
         """

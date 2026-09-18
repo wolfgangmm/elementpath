@@ -94,6 +94,15 @@ class XPath31ParserTest(test_xpath30.XPath30ParserTest):
     def setUp(self):
         self.parser = XPath31Parser(namespaces=self.namespaces)
 
+    def test_prefixed_names_of_function_names(self):
+        # Element names that collide with function names, e.g. fn:head or array:sort
+        root = self.etree.XML('<a xmlns="http://xpath.test/ns"><head>x</head><sort/></a>')
+        self.check_selector('count(//tst:head)', root, 1, namespaces=self.namespaces)
+        self.check_selector('string(//tst:head)', root, 'x', namespaces=self.namespaces)
+        self.check_selector('count(//tst:a[tst:head])', root, 1, namespaces=self.namespaces)
+        self.check_selector('count(//tst:sort)', root, 1, namespaces=self.namespaces)
+        self.check_selector('count(//tst:a/tst:head)', root, 1, namespaces=self.namespaces)
+
     def test_map_weekdays(self):
         token = self.parser.parse(MAP_WEEKDAYS)
         self.assertIsInstance(token, XPathMap)
