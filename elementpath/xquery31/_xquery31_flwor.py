@@ -10,21 +10,24 @@
 """
 XQuery 3.1 implementation - part 3 (FLWOR expressions)
 
-Group by and window clauses are not supported.
+Window clauses are not supported.
 
 Refs:
   - https://www.w3.org/TR/xquery-31/#id-flwor-expressions
+  - https://www.w3.org/TR/xquery-31/#id-group-by
 """
 import math
 import re
 from collections.abc import Iterable, Iterator
 from copy import copy
+from decimal import Decimal
 from functools import cmp_to_key
 from typing import Any, NamedTuple, Optional, Union
 
 import elementpath.aliases as ta
 
 from elementpath.collations import CollationManager
+from elementpath.compare import deep_equal
 from elementpath.exceptions import ElementPathLocaleError
 from elementpath.datatypes import AnyURI, UntypedAtomic
 from elementpath.sequence_types import is_sequence_type, match_sequence_type
@@ -72,10 +75,51 @@ class CountClause(NamedTuple):
     varname: str
 
 
-Clause = Union[ForClause, LetClause, WhereClause, OrderByClause, CountClause]
+class GroupingSpec(NamedTuple):
+    varname: str
+    sequence_type: Optional[str]
+    expr: Optional[XPathToken]  # the ':=' expression, None for a bare grouping variable
+    var_token: XPathToken  # the reference used to atomize the grouping key
+    collation: Optional[str]
+
+
+class GroupByClause(NamedTuple):
+    specs: list[GroupingSpec]
+    non_grouping_varnames: frozenset[str]
+
+
+Clause = Union[ForClause, LetClause, WhereClause, OrderByClause, CountClause, GroupByClause]
 
 WINDOW_PATTERN = re.compile(r'\s*(?:tumbling|sliding)\s+window\b')
 INTERMEDIATE_KEYWORDS = frozenset(('where', 'order', 'stable', 'count', 'group'))
+
+EMPTY_KEY = ('empty',)
+"""The normalized grouping key of an empty sequence."""
+
+NAN_KEY = ('nan',)
+"""The normalized grouping key of NaN, that is grouped with itself."""
+
+
+class DeepEqualKey:
+    """
+    A normalized grouping key for the atomic values that can't be hashed
+    consistently with their equality rules. All these keys share the same
+    hash, so they are compared with fn:deep-equal within a single bucket.
+    """
+    __slots__ = 'value', 'collation', 'token'
+
+    def __init__(self, value: Any, collation: Optional[str], token: XPathToken) -> None:
+        self.value = value
+        self.collation = collation
+        self.token = token
+
+    def __hash__(self) -> int:
+        return hash(DeepEqualKey)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, DeepEqualKey):
+            return NotImplemented
+        return deep_equal((self.value,), (other.value,), self.collation, self.token)
 
 
 class FLWORExpression(XPathToken):
@@ -124,6 +168,8 @@ class FLWORExpression(XPathToken):
                 tuples = self.iter_where_clause(clause, tuples, context)
             elif isinstance(clause, CountClause):
                 tuples = self.iter_count_clause(clause, tuples)
+            elif isinstance(clause, GroupByClause):
+                tuples = self.group_tuples(clause, tuples, context)
             else:
                 tuples = self.sort_tuples(clause, tuples, context)
 
@@ -183,6 +229,98 @@ class FLWORExpression(XPathToken):
             -> Iterator[Bindings]:
         for position, variables in enumerate(tuples, start=1):
             yield {**variables, clause.varname: position}
+
+    def group_tuples(self, clause: GroupByClause, tuples: Iterable[Bindings],
+                     context: XPathContext) -> list[Bindings]:
+        tuples = list(tuples)
+
+        # A grouping spec with an expression binds its variable like a let clause,
+        # and is visible to the specs that follow it.
+        for spec in clause.specs:
+            if spec.expr is not None:
+                let_clause = LetClause(spec.varname, spec.sequence_type, spec.expr)
+                tuples = list(self.iter_let_clause(let_clause, tuples, context))
+
+        if isinstance(context, XPathSchemaContext):
+            return tuples  # the grouping variables are bound, don't partition
+
+        # Atomize the grouping variables, collecting the key values used for
+        # binding and the normalized keys used for matching the groups.
+        key_values: list[list[Any]] = [[] for _ in tuples]
+        group_keys: list[list[Any]] = [[] for _ in tuples]
+
+        for spec in clause.specs:
+            collation = spec.collation or self.parser.default_collation
+            with CollationManager(collation, token=spec.var_token) as manager:
+                for variables, values, keys in zip(tuples, key_values, group_keys):
+                    tuple_context = self.get_tuple_context(context, variables)
+                    value = self.get_group_key(spec, tuple_context)
+                    values.append(value)
+                    keys.append(self.normalize_group_key(value, spec, collation, manager))
+
+        # Groups are yielded in order of their first occurrence in the tuple stream
+        groups: dict[tuple[Any, ...], tuple[list[Any], list[Bindings]]] = {}
+        for variables, values, keys in zip(tuples, key_values, group_keys):
+            group = groups.setdefault(tuple(keys), (values, []))
+            group[1].append(variables)
+
+        return [self.merge_group(clause, values, group) for values, group in groups.values()]
+
+    @staticmethod
+    def merge_group(clause: GroupByClause, key_values: list[Any],
+                    group: list[Bindings]) -> Bindings:
+        # The variables that are not grouping variables are bound to the
+        # concatenation of their values in the tuples of the group. The other
+        # variables come from an outer scope, so they are left untouched.
+        variables = {**group[0]}
+
+        for varname in clause.non_grouping_varnames:
+            sequence: list[Any] = []
+            for item in (t.get(varname) for t in group):
+                if isinstance(item, list):
+                    sequence.extend(item)
+                elif item is not None:
+                    sequence.append(item)
+            variables[varname] = sequence
+
+        for spec, value in zip(clause.specs, key_values):
+            variables[spec.varname] = [] if value is EMPTY_KEY else value
+
+        return variables
+
+    @staticmethod
+    def get_group_key(spec: GroupingSpec, context: XPathContext) -> Any:
+        values = [x for x in spec.var_token.atomization(context)]
+        if not values:
+            return EMPTY_KEY
+        elif len(values) > 1:
+            msg = "a grouping key must be a single atomic value or an empty sequence"
+            raise spec.var_token.error('XPTY0004', msg)
+
+        value = values[0]
+        if isinstance(value, UntypedAtomic):
+            return str(value)  # untyped values are grouped as xs:string
+        return value
+
+    @staticmethod
+    def normalize_group_key(value: Any, spec: GroupingSpec, collation: Optional[str],
+                            manager: CollationManager) -> Any:
+        # Builds a hashable key that is equal for the values that fn:deep-equal
+        # considers equal, so that the groups can be matched with a mapping.
+        if value is EMPTY_KEY:
+            return EMPTY_KEY
+        elif isinstance(value, bool):
+            return 'boolean', value
+        elif isinstance(value, (str, AnyURI)):
+            return 'string', manager.strxfrm(str(value))
+        elif isinstance(value, (int, float, Decimal)):
+            if isinstance(value, float) and math.isnan(value):
+                return NAN_KEY
+            try:
+                return 'number', float(value)
+            except (OverflowError, ValueError):
+                pass
+        return 'other', DeepEqualKey(value, collation, spec.var_token)
 
     def sort_tuples(self, clause: OrderByClause, tuples: Iterable[Bindings],
                     context: XPathContext) -> list[Bindings]:
@@ -278,7 +416,7 @@ def nud__flwor_expression(self: XPathToken) -> XPathToken:
         elif keyword == 'count':
             token.clauses.append(CountClause(parse_variable(token)))
         elif keyword == 'group':
-            raise parser.token.error('XPST0003', "group by clauses are not supported")
+            parse_group_by_clause(token)
         else:
             if keyword == 'stable':
                 parser.next_token.expected('(name)')
@@ -327,11 +465,31 @@ XQuery31Parser.symbol_table['for'] = _ForExpression
 XQuery31Parser.symbol_table['let'] = _LetExpression
 
 
-def parse_variable(token: XPathToken) -> str:
+def parse_variable_reference(token: XPathToken) -> XPathToken:
     token.parser.advance('$')
     variable = token.parser.token.nud()
     token.append(variable)
-    return str(variable.value)
+    return variable
+
+
+def parse_variable(token: XPathToken) -> str:
+    return str(parse_variable_reference(token).value)
+
+
+def parse_collation(token: XPathToken) -> Optional[str]:
+    parser = token.parser
+    if not is_keyword(parser.next_token, 'collation'):
+        return None
+
+    parser.advance()
+    collation = str(parser.advance('(string)').value)
+    try:
+        with CollationManager(collation, token=parser.token):
+            pass
+    except ElementPathLocaleError:
+        msg = f"unsupported collation {collation!r}"
+        raise parser.token.error('XQST0076', msg) from None
+    return collation
 
 
 def parse_type_declaration(token: XPathToken) -> Optional[str]:
@@ -430,20 +588,58 @@ def parse_order_by_clause(token: FLWORExpression) -> None:
                 raise parser.next_token.wrong_syntax()
             parser.advance()
 
-        collation = None
-        if is_keyword(parser.next_token, 'collation'):
-            parser.advance()
-            collation = str(parser.advance('(string)').value)
-            try:
-                with CollationManager(collation, token=parser.token):
-                    pass
-            except ElementPathLocaleError:
-                msg = f"unsupported collation {collation!r}"
-                raise parser.token.error('XQST0076', msg) from None
-
-        specs.append(OrderSpec(expr, descending, empty_greatest, collation))
+        specs.append(OrderSpec(expr, descending, empty_greatest, parse_collation(token)))
         if parser.next_token.symbol != ',':
             break
         parser.advance()
 
     token.clauses.append(OrderByClause(specs))
+
+
+def iter_bound_varnames(clauses: Iterable[Clause]) -> Iterator[str]:
+    """Yields the names of the variables bound in the tuple stream by the clauses."""
+    for clause in clauses:
+        if isinstance(clause, ForClause):
+            yield clause.varname
+            if clause.position_varname is not None:
+                yield clause.position_varname
+        elif isinstance(clause, (LetClause, CountClause)):
+            yield clause.varname
+        elif isinstance(clause, GroupByClause):
+            yield from (spec.varname for spec in clause.specs)
+            yield from clause.non_grouping_varnames
+
+
+def parse_group_by_clause(token: FLWORExpression) -> None:
+    parser = token.parser
+    if not is_keyword(parser.next_token, 'by'):
+        raise parser.next_token.wrong_syntax()
+    parser.advance()
+
+    specs = []
+    while True:
+        var_token = parse_variable_reference(token)
+        sequence_type = parse_type_declaration(token)
+
+        expr = None
+        if parser.next_token.symbol == ':=':
+            parser.advance(':=')
+            expr = parser.expression(5)
+            token.append(expr)
+        elif sequence_type is not None:
+            # A type declaration is allowed only with an initializing expression
+            raise parser.next_token.wrong_syntax()
+
+        specs.append(GroupingSpec(
+            str(var_token.value), sequence_type, expr, var_token, parse_collation(token)
+        ))
+        if parser.next_token.symbol != ',':
+            break
+        parser.advance()
+
+    grouping_varnames = {spec.varname for spec in specs}
+    non_grouping_varnames = frozenset(
+        name for name in iter_bound_varnames(token.clauses)
+        if name not in grouping_varnames
+    )
+    token.clauses.append(GroupByClause(specs, non_grouping_varnames))

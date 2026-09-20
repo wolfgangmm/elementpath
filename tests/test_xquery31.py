@@ -592,6 +592,115 @@ class XQuery31FLWORTest(unittest.TestCase):
         self.check_error('for $x in (1, 2) order $x return $x', 'XPST0003')
         self.check_error('for $x in (1, 2) stable by $x return $x', 'XPST0003')
 
+    def test_group_by_clause(self):
+        self.assertEqual(
+            self.select('for $x in 1 to 6 group by $k := $x mod 3 return sum($x)'),
+            [5, 7, 9]
+        )
+        self.assertEqual(
+            self.select('for $x in 1 to 6 group by $k := $x mod 3 return $k'), [1, 2, 0]
+        )
+        # Non-grouping variables are rebound to the sequence of their values
+        self.assertEqual(
+            self.select('for $x in 1 to 4 let $y := $x * 2 '
+                        'group by $k := $x mod 2 return string-join($y ! string(), ",")'),
+            ['2,6', '4,8']
+        )
+        # A grouping variable can be already bound in the tuple stream
+        self.assertEqual(
+            self.select('for $x in 1 to 4 let $k := $x mod 2 group by $k return sum($x)'),
+            [4, 6]
+        )
+        # Grouping specs are bound in sequence, so a spec can use the previous ones
+        self.assertEqual(
+            self.select('for $x in 1 to 6 group by $a := $x mod 3, $b := $a * 2 '
+                        'return concat($a, $b, "/", count($x))'),
+            ['12/2', '24/2', '00/2']
+        )
+
+    def test_group_by_keys(self):
+        # Untyped values are grouped as strings, so the two items are in the same group
+        self.assertEqual(
+            self.select('for $x in ("1", xs:untypedAtomic("1")) '
+                        'group by $k := $x return count($x)'), [2]
+        )
+        self.assertEqual(
+            self.select('for $x in (1, "1") group by $k := $x return count($x)'), [1, 1]
+        )
+        # Numeric values are grouped across the numeric types
+        self.assertEqual(
+            self.select('for $x in (1, 1.0, xs:double("1"), 2) '
+                        'group by $k := $x return count($x)'), [3, 1]
+        )
+        self.assertEqual(
+            self.select('for $x in (1, xs:double("NaN"), xs:double("NaN")) '
+                        'group by $k := $x return count($x)'), [1, 2]
+        )
+        # Booleans are not grouped with the numbers they are comparable to
+        self.assertEqual(
+            self.select('for $x in (1, true()) group by $k := $x return count($x)'), [1, 1]
+        )
+        # Values that aren't strings nor numbers are compared with fn:deep-equal
+        self.assertEqual(
+            self.select('for $x in (xs:date("2020-01-01"), xs:date("2020-01-01"), '
+                        'xs:date("2021-01-01")) group by $k := $x return count($x)'), [2, 1]
+        )
+        # Strings are grouped using the applicable collation
+        collation = 'http://www.w3.org/2005/xpath-functions/collation/html-ascii-case-insensitive'
+        self.assertEqual(
+            self.select('for $x in ("a", "A", "b") group by $k := $x '
+                        f'collation "{collation}" return concat($k, count($x))'), ['a2', 'b1']
+        )
+        self.assertEqual(
+            self.select('for $x in ("a", "A", "b") group by $k := $x '
+                        'return concat($k, count($x))'), ['a1', 'A1', 'b1']
+        )
+        # The items with an empty grouping key are grouped together
+        self.assertEqual(
+            self.select('for $x in 1 to 3 group by $k := $x[. eq 2] return count($x)'), [2, 1]
+        )
+        self.assertEqual(
+            self.select('for $x in 1 to 3 group by $k := $x[. eq 2] return count($k)'), [0, 1]
+        )
+
+    def test_group_by_with_other_clauses(self):
+        self.assertEqual(
+            self.select('for $i in /root/item group by $k := string($i/@n) '
+                        'order by $k descending return $k'), ['2', '1', '']
+        )
+        self.assertEqual(
+            self.select('for $x in 1 to 6 group by $k := $x mod 3 '
+                        'where sum($x) gt 5 return $k'), [2, 0]
+        )
+        self.assertEqual(
+            self.select('for $x in 1 to 6 group by $k := $x mod 3 count $c '
+                        'return concat($c, ":", $k)'), ['1:1', '2:2', '3:0']
+        )
+        # Grouping can be applied again to the post-grouping tuple stream
+        self.assertEqual(
+            self.select('for $x in 1 to 6 group by $a := $x mod 3 '
+                        'group by $b := $a mod 2 return sum($x)'), [5, 16]
+        )
+        # Variables bound outside the FLWOR expression are not rebound
+        self.assertEqual(
+            self.select('$v || string-join(for $x in 1 to 4 '
+                        'group by $k := $x mod 2 return string($k))',
+                        variables={'v': 'x'}), 'x10'
+        )
+
+    def test_group_by_errors(self):
+        self.check_error('for $x in (1, 2) group $k := $x return $x', 'XPST0003')
+        self.check_error('for $x in (1, 2) group by $k = $x return $x', 'XPST0003')
+        self.check_error('for $x in (1, 2) group by return $x', 'XPST0003')
+        # A type declaration is allowed only with an initializing expression
+        self.check_error('for $x in (1, 2) group by $k as xs:integer return $x', 'XPST0003')
+        self.check_error('for $x in (1, 2) group by $k as xs:string := $x return $x',
+                         'XPTY0004')
+        # A grouping key must be a single atomic value or an empty sequence
+        self.check_error('for $x in (1, 2) group by $k := (1, 2) return $x', 'XPTY0004')
+        self.check_error('for $x in (1, 2) group by $k := $x collation "unknown" return $x',
+                         'XQST0076')
+
     def test_syntax_errors(self):
         self.check_error('for $x in (1, 2)', 'XPST0003')
         self.check_error('for $x in (1, 2) where $x', 'XPST0003')
@@ -602,7 +711,6 @@ class XQuery31FLWORTest(unittest.TestCase):
         self.check_error('1 for $x in (1, 2) return $x', 'XPST0003')
 
     def test_unsupported_clauses(self):
-        self.check_error('for $x in (1, 2) group by $k := $x return $x', 'XPST0003')
         self.check_error('for tumbling window $w in (1, 2) start when true() return $w',
                          'XPST0003')
         self.check_error('for sliding window $w in (1, 2) start when true() return $w',
